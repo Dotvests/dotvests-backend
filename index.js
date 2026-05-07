@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const db = require('./config/db');
+const priceSimulator = require('./services/priceSimulator');
 
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/user');
@@ -16,6 +17,9 @@ const adminRoutes = require('./routes/admin');
 const paymentRoutes = require('./routes/payment');
 const waitlistRoutes = require('./routes/waitlist');
 const contactRoutes = require('./routes/contact');
+const kycRoutes = require('./routes/kyc');
+const escrowRoutes = require('./routes/escrow');
+const transactionRoutes = require('./routes/transactions');
 
 const app = express();
 
@@ -51,6 +55,31 @@ app.post('/api/payment/webhook', express.raw({ type: 'application/json' }), asyn
 
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const { event, data } = body;
+
+    if (event === 'dedicatedaccount.assign.success') {
+      const db = require('./config/db');
+
+      const { customer, assignment } = data;
+      try {
+        const wallet = db.prepare(
+          'SELECT * FROM wallets WHERE paystack_customer_code = ?'
+        ).get(customer.customer_code);
+
+        if (wallet) {
+          db.prepare(
+            'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)'
+          ).run(
+            wallet.user_id,
+            'Virtual Account Ready',
+            `Your dedicated virtual account (${assignment.account_number}) is now ready to receive transfers. You can start depositing funds.`
+          );
+        }
+      } catch (error) {
+        console.error('Error processing DVA assignment:', error.message);
+      }
+
+      return res.status(200).json({ received: true });
+    }
 
     if (event === 'charge.success') {
       const axios = require('axios');
@@ -108,10 +137,13 @@ app.use(express.static(__dirname));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
+app.use('/api/kyc', kycRoutes);
 app.use('/api/stocks', stockRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/portfolio', portfolioRoutes);
+app.use('/api/escrow', escrowRoutes);
+app.use('/api/transactions', transactionRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/waitlist', waitlistRoutes);
@@ -148,4 +180,6 @@ app.use(function(req, res) {
 var PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', function() {
   console.log('Server running on port ' + PORT);
+  // Start price simulator
+  priceSimulator.start();
 });
