@@ -55,7 +55,7 @@ Comprehensive documentation is available in:
 dotvests-backend/
 ├── config/
 │   ├── db.js              # SQLite database setup
-│   └── blockchain.js      # ZetaChain Web3 integration
+│   └── blockchain.js      # Polymesh Web3 integration
 ├── middleware/
 │   ├── auth.js            # JWT verification & admin check
 │   └── validate.js        # Input validation
