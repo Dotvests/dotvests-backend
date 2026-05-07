@@ -1,15 +1,200 @@
 const express = require('express');
 const router = express.Router();
+const axios = require('axios');
 const db = require('../config/db');
 const { protect } = require('../middleware/auth');
+
+// CREATE WALLET (with Paystack DVA)
+router.post('/create', protect, async (req, res) => {
+  try {
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Guard: KYC must be verified
+    if (user.kyc_status !== 'verified') {
+      return res.status(403).json({
+        success: false,
+        message: 'KYC verification required before wallet creation'
+      });
+    }
+
+    const wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
+
+    if (wallet && wallet.wallet_created) {
+      return res.status(400).json({
+        success: false,
+        message: 'Wallet already created for this account'
+      });
+    }
+
+    try {
+      // Create Paystack customer
+      const customerResponse = await axios.post(
+        'https://api.paystack.co/customer',
+        {
+          email: user.email,
+          first_name: user.full_name.split(' ')[0] || '',
+          last_name: user.full_name.split(' ')[1] || '',
+          phone: user.phone
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (!customerResponse.data.status) {
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create Paystack customer'
+        });
+      }
+
+      const paystackCustomerCode = customerResponse.data.data.customer_code;
+
+      // Create Dedicated Virtual Account (DVA)
+      const dvaResponse = await axios.post(
+        'https://api.paystack.co/dedicated_account',
+        {
+          customer: paystackCustomerCode,
+          preferred_bank: 'wema-bank' // Wema Bank for DVA
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (!dvaResponse.data.status) {
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to create dedicated virtual account'
+        });
+      }
+
+      const dvaData = dvaResponse.data.data;
+
+      // Update wallet with DVA details
+      if (!wallet) {
+        // Create new wallet if doesn't exist
+        db.prepare(`
+          INSERT INTO wallets (user_id, balance, currency, paystack_customer_code, dva_account_number, dva_bank_name, dva_bank_code, wallet_created)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          req.user.id,
+          0,
+          'NGN',
+          paystackCustomerCode,
+          dvaData.account_number,
+          dvaData.bank.name,
+          dvaData.bank.code,
+          1
+        );
+      } else {
+        // Update existing wallet
+        db.prepare(`
+          UPDATE wallets
+          SET paystack_customer_code = ?, dva_account_number = ?, dva_bank_name = ?, dva_bank_code = ?, wallet_created = 1
+          WHERE user_id = ?
+        `).run(
+          paystackCustomerCode,
+          dvaData.account_number,
+          dvaData.bank.name,
+          dvaData.bank.code,
+          req.user.id
+        );
+      }
+
+      // Create notification
+      db.prepare(
+        'INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)'
+      ).run(
+        req.user.id,
+        'Wallet Created',
+        `Your DotVests wallet has been created. Your dedicated account number is ${dvaData.account_number}. You can now receive transfers directly to this account.`
+      );
+
+      return res.status(201).json({
+        success: true,
+        message: 'Wallet created successfully',
+        data: {
+          account_number: dvaData.account_number,
+          bank_name: dvaData.bank.name,
+          bank_code: dvaData.bank.code,
+          account_type: dvaData.assignment.account_type
+        }
+      });
+
+    } catch (paystackError) {
+      console.error('Paystack error:', paystackError.response?.data || paystackError.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to create wallet with payment provider',
+        error: paystackError.response?.data?.message || paystackError.message
+      });
+    }
+
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Could not create wallet',
+      error: error.message
+    });
+  }
+});
+
+// GET DVA DETAILS
+router.get('/dva', protect, (req, res) => {
+  try {
+    const wallet = db.prepare(`
+      SELECT dva_account_number, dva_bank_name, dva_bank_code, wallet_created
+      FROM wallets WHERE user_id = ?
+    `).get(req.user.id);
+
+    if (!wallet || !wallet.wallet_created) {
+      return res.status(404).json({
+        success: false,
+        message: 'No wallet created yet. Please create a wallet first.'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        account_number: wallet.dva_account_number,
+        bank_name: wallet.dva_bank_name,
+        bank_code: wallet.dva_bank_code
+      }
+    });
+
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Could not fetch DVA details',
+      error: error.message
+    });
+  }
+});
 
 // GET WALLET BALANCE
 router.get('/', protect, (req, res) => {
   try {
     const wallet = db.prepare(`
-      SELECT id, user_id, balance, currency,
+      SELECT id, user_id, balance, investment_balance, currency,
       COALESCE(account_number, 'Not set') as account_number,
       COALESCE(bank_name, 'Access Bank') as bank_name,
+      COALESCE(dva_account_number, '') as dva_account_number,
+      wallet_created,
       updated_at
       FROM wallets WHERE user_id = ?
     `).get(req.user.id);
@@ -23,7 +208,10 @@ router.get('/', protect, (req, res) => {
 
     return res.status(200).json({
       success: true,
-      wallet
+      data: {
+        ...wallet,
+        total_balance: (wallet.balance || 0) + (wallet.investment_balance || 0)
+      }
     });
 
   } catch (error) {

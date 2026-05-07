@@ -2,6 +2,56 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
 const { protect, adminOnly } = require('../middleware/auth');
+const priceSimulator = require('../services/priceSimulator');
+
+// LIVE PRICE STREAM (SSE)
+router.get('/stream', (req, res) => {
+  try {
+    const { tickers } = req.query;
+    const tickerList = tickers ? tickers.split(',').map(t => t.toUpperCase()) : null;
+    priceSimulator.subscribe(res, tickerList);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Could not subscribe to price stream',
+      error: error.message
+    });
+  }
+});
+
+// GET PRICE HISTORY (5-minute candles)
+router.get('/:ticker/history', (req, res) => {
+  try {
+    const { ticker } = req.params;
+    const { limit = 100, from, to } = req.query;
+
+    const stock = db.prepare(
+      'SELECT id FROM stocks WHERE ticker = ? AND is_active = 1'
+    ).get(ticker.toUpperCase());
+
+    if (!stock) {
+      return res.status(404).json({
+        success: false,
+        message: 'Stock not found'
+      });
+    }
+
+    const history = priceSimulator.getHistory(stock.id, parseInt(limit), from, to);
+
+    return res.status(200).json({
+      success: true,
+      data: history,
+      count: history.length,
+      ticker: ticker.toUpperCase()
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Could not fetch price history',
+      error: error.message
+    });
+  }
+});
 
 // GET ALL STOCKS
 router.get('/', (req, res) => {
