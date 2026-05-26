@@ -1,7 +1,7 @@
 const { Polymesh } = require('@polymeshassociation/polymesh-sdk');
 const { Keyring } = require('@polkadot/keyring');
-const { cryptoWaitReady, u8aToHex } = require('@polkadot/util-crypto');
-const { hexToU8a } = require('@polkadot/util');
+const { cryptoWaitReady, blake2AsU8a } = require('@polkadot/util-crypto');
+const { TypeRegistry } = require('@polkadot/types');
 const fs = require('fs');
 const path = require('path');
 
@@ -23,26 +23,46 @@ const connectPolymesh = async () => {
 
     console.log('Account loaded:', pair.address);
 
+    // TypeRegistry from the same @polkadot/types v11 the SDK uses — ensures
+    // ExtrinsicPayload encodes identically to what the chain expects.
+    // CheckTxVersion (transactionVersion: u32) is absent from the default
+    // registry in this polkadot.js version and must be registered manually.
+    const registry = new TypeRegistry();
+    registry.setSignedExtensions(
+      ['CheckSpecVersion', 'CheckTxVersion', 'CheckGenesis', 'CheckMortality',
+       'CheckNonce', 'CheckWeight', 'ChargeTransactionPayment', 'StoreCallMetadata'],
+      {
+        CheckTxVersion:    { extrinsic: {}, payload: { transactionVersion: 'u32' } },
+        StoreCallMetadata: { extrinsic: {}, payload: {} },
+      }
+    );
+
     const signingManager = {
       setSs58Format: (format) => { keyring.setSS58Format(format); },
       getAccounts: async () => [pair.address],
-      getExternalSigner: async () => ({
-        signPayload: async (payload) => {
-          const data = hexToU8a(payload.data);
-          const signature = pair.sign(data);
-          return { id: 1, signature: u8aToHex(signature) };
-        },
-        signRaw: async (raw) => {
-          const data = hexToU8a(raw.data);
-          const signature = pair.sign(data);
-          return { id: 1, signature: u8aToHex(signature) };
-        }
-      })
+
+      signPayload: async (payload) => {
+        const raw = registry.createType('ExtrinsicPayload', payload, { version: payload.version });
+        const u8a = raw.toU8a(true);
+        const toSign = u8a.length > 256 ? blake2AsU8a(u8a) : u8a;
+        const sig = pair.sign(toSign, { withType: true });
+        return { id: 1, signature: '0x' + Buffer.from(sig).toString('hex') };
+      },
+
+      signRaw: async (raw) => {
+        const data = Buffer.from(raw.data.replace(/^0x/, ''), 'hex');
+        const sig = pair.sign(data, { withType: true });
+        return { id: 1, signature: '0x' + Buffer.from(sig).toString('hex') };
+      },
+
+      // connect() calls getExternalSigner() to register a Polkadot.js API signer.
+      // Returning `this` reuses the methods already defined above.
+      getExternalSigner() { return this; },
     };
 
     polymeshInstance = await Polymesh.connect({
       nodeUrl: process.env.POLYMESH_NODE_URL,
-      signingManager
+      signingManager,
     });
 
     const networkInfo = await polymeshInstance.network.getNetworkProperties();

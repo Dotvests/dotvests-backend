@@ -69,6 +69,7 @@ function initializeSQLiteSchema(db) {
   try { db.exec(`ALTER TABLE users ADD COLUMN smile_job_id TEXT`); } catch(e) {}
   try { db.exec(`ALTER TABLE users ADD COLUMN liveness_passed INTEGER DEFAULT 0`); } catch(e) {}
   try { db.exec(`ALTER TABLE users ADD COLUMN kyc_submitted_at DATETIME`); } catch(e) {}
+  try { db.exec(`ALTER TABLE users ADD COLUMN polymesh_did TEXT`); } catch(e) {}
 
   // Add missing columns to wallets table
   try { db.exec(`ALTER TABLE wallets ADD COLUMN account_number TEXT`); } catch(e) {}
@@ -274,6 +275,7 @@ async function initializePostgresSchema(db) {
         smile_job_id VARCHAR(255),
         liveness_passed INTEGER DEFAULT 0,
         kyc_submitted_at TIMESTAMP,
+        polymesh_did TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
