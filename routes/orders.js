@@ -1,8 +1,257 @@
 const express = require('express');
 const router = express.Router();
+const { BigNumber } = require('@polymeshassociation/polymesh-sdk');
 const db = require('../config/db');
 const { protect } = require('../middleware/auth');
 const { mintTokens, burnTokens } = require('../config/blockchain');
+const { connectPolymesh } = require('../config/polymesh');
+const { TOKEN_PRICES } = require('../constants/tokenPrices');
+
+// POST /api/orders/buy — Polymesh token purchase
+router.post('/buy', protect, async (req, res) => {
+  try {
+    const { ticker, quantity } = req.body;
+
+    if (!ticker || !quantity) {
+      return res.status(400).json({ success: false, message: 'ticker and quantity are required' });
+    }
+
+    const upperTicker = ticker.toUpperCase();
+    const tokenPrice = TOKEN_PRICES[upperTicker];
+    if (!tokenPrice) {
+      return res.status(400).json({
+        success: false,
+        message: `Unknown ticker ${ticker}. Supported: ${Object.keys(TOKEN_PRICES).join(', ')}`,
+      });
+    }
+
+    const tokenAmount = Number(quantity);
+    if (isNaN(tokenAmount) || tokenAmount <= 0) {
+      return res.status(400).json({ success: false, message: 'quantity must be a positive number' });
+    }
+
+    const nairaAmount = tokenAmount * tokenPrice;
+
+    // Check user has a Polymesh DID
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!user.polymesh_did) {
+      return res.status(403).json({
+        success: false,
+        message: 'Polymesh identity required. Create your DID first via POST /api/polymesh/identity/create',
+      });
+    }
+
+    // Check wallet balance
+    const wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
+    if (!wallet || wallet.balance < nairaAmount) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient balance. You need ₦${nairaAmount.toLocaleString()} but have ₦${(wallet?.balance || 0).toLocaleString()}`,
+      });
+    }
+
+    const venueId = process.env.POLYMESH_VENUE_ID;
+    if (!venueId) {
+      return res.status(500).json({ success: false, message: 'POLYMESH_VENUE_ID not configured — run scripts/create-venue.js first' });
+    }
+
+    const polymesh = await connectPolymesh();
+
+    // Check CDD eligibility
+    const cddResult = await polymesh.claims.getCddClaims({ target: user.polymesh_did, includeExpired: false });
+    if (cddResult.data.length === 0) {
+      return res.status(403).json({ success: false, message: 'Investor does not have a valid CDD claim on Polymesh' });
+    }
+
+    // Check issuer portfolio free balance for this ticker (TASK 7 supply guard)
+    const issuerIdentity = await polymesh.getSigningIdentity();
+    const issuerPortfolios = await issuerIdentity.portfolios.getPortfolios();
+    const issuerPortfolio = issuerPortfolios[0];
+    const balances = await issuerPortfolio.getAssetBalances();
+
+    let assetId = null;
+    let freeBalance = 0;
+    for (const b of balances) {
+      const details = await b.asset.details();
+      if (details.ticker === upperTicker) {
+        assetId = b.asset.id;
+        freeBalance = parseFloat(b.free.toString());
+        break;
+      }
+    }
+
+    if (assetId === null) {
+      return res.status(400).json({ success: false, message: `Insufficient token supply. No ${upperTicker} tokens available` });
+    }
+    if (freeBalance < tokenAmount) {
+      return res.status(400).json({ success: false, message: `Insufficient token supply. Only ${freeBalance} ${upperTicker} available` });
+    }
+
+    // Create settlement instruction
+    const venue = await polymesh.settlements.getVenue({ id: new BigNumber(venueId) });
+    const investorIdentity = await polymesh.identities.getIdentity({ did: user.polymesh_did });
+    const investorPortfolios = await investorIdentity.portfolios.getPortfolios();
+    const investorPortfolio = investorPortfolios[0];
+
+    const tx = await venue.addInstruction({
+      legs: [{
+        from: issuerPortfolio,
+        to: investorPortfolio,
+        asset: upperTicker,
+        amount: new BigNumber(tokenAmount),
+      }],
+    });
+    const instruction = await tx.run();
+    const instructionId = instruction.id.toString();
+
+    // Deduct wallet balance and record everything in DB
+    db.prepare(
+      'UPDATE wallets SET balance = ?, investment_balance = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?'
+    ).run(wallet.balance - nairaAmount, (wallet.investment_balance || 0) + nairaAmount, req.user.id);
+
+    const reference = 'BUY-' + Date.now() + '-' + req.user.id;
+    db.prepare(
+      "INSERT INTO transactions (user_id, type, amount, description, reference, status) VALUES (?, 'investment', ?, ?, ?, 'completed')"
+    ).run(req.user.id, nairaAmount, `Invested ₦${nairaAmount.toLocaleString()} in ${tokenAmount} ${upperTicker} tokens`, reference);
+
+    db.prepare(
+      "INSERT INTO settlements (instruction_id, user_id, asset_id, ticker, amount, naira_amount, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')"
+    ).run(instructionId, req.user.id, assetId, upperTicker, tokenAmount, nairaAmount);
+
+    db.prepare(
+      "INSERT INTO notifications (user_id, title, message) VALUES (?, 'Token Purchase Initiated', ?)"
+    ).run(req.user.id, `Settlement instruction created for ${tokenAmount} ${upperTicker} tokens (₦${nairaAmount.toLocaleString()}). Awaiting affirmation.`);
+
+    return res.status(201).json({
+      success: true,
+      instructionId,
+      ticker: upperTicker,
+      amount: tokenAmount,
+      nairaAmount,
+      status: 'pending',
+    });
+
+  } catch (error) {
+    console.error('Buy order error:', error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// POST /api/orders/sell — Polymesh token redemption (burn)
+router.post('/sell', protect, async (req, res) => {
+  try {
+    const { ticker, quantity } = req.body;
+
+    if (!ticker || !quantity) {
+      return res.status(400).json({ success: false, message: 'ticker and quantity are required' });
+    }
+
+    const upperTicker = ticker.toUpperCase();
+    const tokenPrice = TOKEN_PRICES[upperTicker];
+    if (!tokenPrice) {
+      return res.status(400).json({
+        success: false,
+        message: `Unknown ticker ${ticker}. Supported: ${Object.keys(TOKEN_PRICES).join(', ')}`,
+      });
+    }
+
+    const tokenAmount = Number(quantity);
+    if (isNaN(tokenAmount) || tokenAmount <= 0) {
+      return res.status(400).json({ success: false, message: 'quantity must be a positive number' });
+    }
+
+    const nairaAmount = tokenAmount * tokenPrice;
+
+    // Check user has a Polymesh DID
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if (!user.polymesh_did) {
+      return res.status(403).json({
+        success: false,
+        message: 'Polymesh identity required. Create your DID first via POST /api/polymesh/identity/create',
+      });
+    }
+
+    // Check user's net token balance from settlements table (custodial model)
+    const balanceRow = db.prepare(`
+      SELECT COALESCE(
+        SUM(CASE WHEN status IN ('pending', 'affirmed', 'settled') THEN amount ELSE 0 END) -
+        SUM(CASE WHEN status = 'burned' THEN amount ELSE 0 END),
+        0
+      ) AS net_balance
+      FROM settlements WHERE user_id = ? AND ticker = ?
+    `).get(req.user.id, upperTicker);
+
+    const netBalance = parseFloat(balanceRow.net_balance) || 0;
+    if (netBalance < tokenAmount) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient token holdings. You hold ${netBalance} ${upperTicker} but requested ${tokenAmount}`,
+      });
+    }
+
+    const polymesh = await connectPolymesh();
+
+    // Get the asset object from issuer's permissions and call redeem
+    const issuerIdentity = await polymesh.getSigningIdentity();
+    const result = await issuerIdentity.assetPermissions.get();
+    const assetItems = Object.values(result);
+
+    let assetObj = null;
+    let assetId = null;
+    for (const item of assetItems) {
+      const a = item.asset || item;
+      const d = await a.details();
+      if (d.ticker === upperTicker) {
+        assetObj = a;
+        assetId = a.id;
+        break;
+      }
+    }
+
+    if (!assetObj) {
+      return res.status(404).json({ success: false, message: `Asset ${upperTicker} not found in issuer account` });
+    }
+
+    // Redeem (burn) tokens from issuer's custodial portfolio
+    const redeemTx = await assetObj.redeem({ amount: new BigNumber(tokenAmount) });
+    await redeemTx.run();
+
+    // Credit wallet and record in DB
+    const wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
+    db.prepare(
+      'UPDATE wallets SET balance = ?, investment_balance = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?'
+    ).run(
+      (wallet.balance || 0) + nairaAmount,
+      Math.max(0, (wallet.investment_balance || 0) - nairaAmount),
+      req.user.id
+    );
+
+    const reference = 'SELL-' + Date.now() + '-' + req.user.id;
+    db.prepare(
+      "INSERT INTO transactions (user_id, type, amount, description, reference, status) VALUES (?, 'sell', ?, ?, ?, 'completed')"
+    ).run(req.user.id, nairaAmount, `Sold ${tokenAmount} ${upperTicker} tokens for ₦${nairaAmount.toLocaleString()}`, reference);
+
+    db.prepare(
+      "INSERT INTO settlements (instruction_id, user_id, asset_id, ticker, amount, naira_amount, status) VALUES (?, ?, ?, ?, ?, ?, 'burned')"
+    ).run('REDEEM-' + Date.now(), req.user.id, assetId, upperTicker, tokenAmount, nairaAmount);
+
+    db.prepare(
+      "INSERT INTO notifications (user_id, title, message) VALUES (?, 'Token Sale Completed', ?)"
+    ).run(req.user.id, `Sold ${tokenAmount} ${upperTicker} tokens for ₦${nairaAmount.toLocaleString()}.`);
+
+    return res.json({
+      success: true,
+      ticker: upperTicker,
+      amount: tokenAmount,
+      nairaAmount,
+      status: 'burned',
+    });
+
+  } catch (error) {
+    console.error('Sell order error:', error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 // PLACE ORDER (BUY OR SELL)
 router.post('/place', protect, async (req, res) => {

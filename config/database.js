@@ -70,6 +70,7 @@ function initializeSQLiteSchema(db) {
   try { db.exec(`ALTER TABLE users ADD COLUMN liveness_passed INTEGER DEFAULT 0`); } catch(e) {}
   try { db.exec(`ALTER TABLE users ADD COLUMN kyc_submitted_at DATETIME`); } catch(e) {}
   try { db.exec(`ALTER TABLE users ADD COLUMN polymesh_did TEXT`); } catch(e) {}
+  try { db.exec(`ALTER TABLE users ADD COLUMN polymesh_portfolio_id TEXT`); } catch(e) {}
 
   // Add missing columns to wallets table
   try { db.exec(`ALTER TABLE wallets ADD COLUMN account_number TEXT`); } catch(e) {}
@@ -242,6 +243,19 @@ function initializeSQLiteSchema(db) {
       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (stock_id) REFERENCES stocks(id)
     );
+
+    CREATE TABLE IF NOT EXISTS settlements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      instruction_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      asset_id TEXT NOT NULL,
+      ticker TEXT NOT NULL,
+      amount REAL NOT NULL,
+      naira_amount REAL NOT NULL,
+      status TEXT DEFAULT 'pending',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
   `);
 
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_price_history_stock_time ON price_history(stock_id, timestamp)'); } catch(e) {}
@@ -276,6 +290,7 @@ async function initializePostgresSchema(db) {
         liveness_passed INTEGER DEFAULT 0,
         kyc_submitted_at TIMESTAMP,
         polymesh_did TEXT,
+        polymesh_portfolio_id TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -417,6 +432,18 @@ async function initializePostgresSchema(db) {
         close DECIMAL(15, 4) NOT NULL,
         volume INTEGER DEFAULT 0,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS settlements (
+        id SERIAL PRIMARY KEY,
+        instruction_id TEXT NOT NULL,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        asset_id TEXT NOT NULL,
+        ticker VARCHAR(20) NOT NULL,
+        amount DECIMAL(20, 6) NOT NULL,
+        naira_amount DECIMAL(15, 2) NOT NULL,
+        status VARCHAR(50) DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE INDEX IF NOT EXISTS idx_price_history_stock_time ON price_history(stock_id, timestamp);

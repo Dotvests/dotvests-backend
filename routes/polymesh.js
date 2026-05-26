@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { BigNumber } = require('@polymeshassociation/polymesh-sdk');
 const { connectPolymesh } = require('../config/polymesh');
-const { protect } = require('../middleware/auth');
+const { protect, adminOnly } = require('../middleware/auth');
 const db = require('../config/db');
 
 // GET /api/polymesh/assets - fetch all DotVests assets
@@ -122,9 +122,16 @@ router.post('/identity/create', protect, async (req, res) => {
     const identity = await tx.run();
     const did = identity.did;
 
-    db.prepare('UPDATE users SET polymesh_did = ? WHERE id = ?').run(did, req.user.id);
+    // Confirm default portfolio exists for the new identity (portfolio "0" is always the default)
+    const investorIdentity = await polymesh.identities.getIdentity({ did });
+    const portfolios = await investorIdentity.portfolios.getPortfolios();
+    // DefaultPortfolio has no numeric ID; store '0' to indicate it is initialised
+    const portfolioId = portfolios.length > 0 ? '0' : null;
 
-    return res.json({ success: true, did });
+    db.prepare('UPDATE users SET polymesh_did = ?, polymesh_portfolio_id = ? WHERE id = ?')
+      .run(did, portfolioId, req.user.id);
+
+    return res.json({ success: true, did, portfolioId });
   } catch (error) {
     console.error('Identity creation error:', error.message);
     return res.status(500).json({ success: false, message: error.message });
@@ -200,6 +207,120 @@ router.post('/settle', protect, async (req, res) => {
     });
   } catch (error) {
     console.error('Settlement error:', error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// POST /api/polymesh/settle/:instructionId/affirm
+// Affirms the issuer's leg of a pending settlement instruction, triggering
+// token transfer once the investor also affirms their receiving leg.
+router.post('/settle/:instructionId/affirm', protect, async (req, res) => {
+  try {
+    const { instructionId } = req.params;
+
+    const polymesh = await connectPolymesh();
+    const instruction = await polymesh.settlements.getInstruction({
+      id: new BigNumber(instructionId),
+    });
+
+    const tx = await instruction.affirm();
+    await tx.run();
+
+    // Update local settlements record to 'affirmed'
+    db.prepare(
+      "UPDATE settlements SET status = 'affirmed' WHERE instruction_id = ? AND user_id = ?"
+    ).run(instructionId, req.user.id);
+
+    return res.json({ success: true, instructionId, status: 'affirmed' });
+
+  } catch (error) {
+    console.error('Affirmation error:', error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// GET /api/polymesh/settle/:instructionId/status
+// Polls the chain for the current status of a settlement instruction
+// and syncs it to the local settlements table.
+router.get('/settle/:instructionId/status', protect, async (req, res) => {
+  try {
+    const { instructionId } = req.params;
+
+    const polymesh = await connectPolymesh();
+    const instruction = await polymesh.settlements.getInstruction({
+      id: new BigNumber(instructionId),
+    });
+
+    const details = await instruction.details();
+    // InstructionStatus enum values: Pending, Failed, Success, Rejected, Unknown
+    const chainStatus = details.status.toLowerCase();
+
+    // Map chain status to our local status values
+    const statusMap = {
+      pending:  'pending',
+      success:  'settled',
+      failed:   'failed',
+      rejected: 'failed',
+      unknown:  'pending',
+    };
+    const localStatus = statusMap[chainStatus] || chainStatus;
+
+    db.prepare(
+      'UPDATE settlements SET status = ? WHERE instruction_id = ? AND user_id = ?'
+    ).run(localStatus, instructionId, req.user.id);
+
+    return res.json({ success: true, instructionId, status: localStatus, chainStatus });
+
+  } catch (error) {
+    console.error('Settlement status error:', error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// POST /api/polymesh/checkpoint/:ticker
+// Admin-only. Creates a Polymesh checkpoint (on-chain snapshot of all token
+// holders at the current block) for the given asset ticker.
+router.post('/checkpoint/:ticker', protect, adminOnly, async (req, res) => {
+  try {
+    const upperTicker = req.params.ticker.toUpperCase();
+
+    const polymesh = await connectPolymesh();
+
+    // Locate the asset object via the issuer's permissions
+    const issuerIdentity = await polymesh.getSigningIdentity();
+    const result = await issuerIdentity.assetPermissions.get();
+    const assetItems = Object.values(result);
+
+    let assetObj = null;
+    for (const item of assetItems) {
+      const a = item.asset || item;
+      const d = await a.details();
+      if (d.ticker === upperTicker) {
+        assetObj = a;
+        break;
+      }
+    }
+
+    if (!assetObj) {
+      return res.status(404).json({ success: false, message: `Asset ${upperTicker} not found` });
+    }
+
+    const tx = await assetObj.checkpoints.create();
+    const checkpoint = await tx.run();
+
+    const checkpointId = checkpoint.id.toString();
+    const createdAt = await checkpoint.createdAt();
+
+    return res.status(201).json({
+      success: true,
+      ticker: upperTicker,
+      checkpointId,
+      blockNumber: createdAt?.blockNumber?.toString() ?? null,
+      blockDate: createdAt?.blockDate ?? null,
+    });
+
+  } catch (error) {
+    console.error('Checkpoint creation error:', error.message);
     return res.status(500).json({ success: false, message: error.message });
   }
 });
