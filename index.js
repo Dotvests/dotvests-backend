@@ -17,6 +17,7 @@ const adminRoutes = require('./routes/admin');
 const paymentRoutes = require('./routes/payment');
 const waitlistRoutes = require('./routes/waitlist');
 const contactRoutes = require('./routes/contact');
+const polymeshRoutes = require('./routes/polymesh');
 const kycRoutes = require('./routes/kyc');
 const escrowRoutes = require('./routes/escrow');
 const transactionRoutes = require('./routes/transactions');
@@ -148,6 +149,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/waitlist', waitlistRoutes);
 app.use('/api/contact', contactRoutes);
+app.use('/api/polymesh', polymeshRoutes);
 
 app.get('/', function(req, res) {
   res.json({
