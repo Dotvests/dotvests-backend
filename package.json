@@ -14,10 +14,20 @@
     "migrate:import": "node scripts/migrate-sqlite-to-postgres.js import",
     "migrate:verify": "node scripts/migrate-sqlite-to-postgres.js verify"
   },
-  "keywords": ["stocks", "trading", "blockchain", "fintech"],
+  "keywords": [
+    "stocks",
+    "trading",
+    "blockchain",
+    "fintech"
+  ],
   "author": "Adeleke Sherifdeen Adeboye",
   "license": "ISC",
   "dependencies": {
+    "@polkadot/keyring": "^13.5.9",
+    "@polkadot/util": "^13.5.9",
+    "@polkadot/util-crypto": "^13.5.9",
+    "@polymeshassociation/local-signing-manager": "^4.1.1",
+    "@polymeshassociation/polymesh-sdk": "^29.0.1",
     "@sendgrid/mail": "^8.1.6",
     "@types/node": "^22.13.11",
     "axios": "^1.13.6",
