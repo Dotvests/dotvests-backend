@@ -65,8 +65,7 @@ router.post('/buy', protect, async (req, res) => {
 
     // Check issuer portfolio free balance for this ticker (TASK 7 supply guard)
     const issuerIdentity = await polymesh.getSigningIdentity();
-    const issuerPortfolios = await issuerIdentity.portfolios.getPortfolios();
-    const issuerPortfolio = issuerPortfolios[0];
+    const issuerPortfolio = await issuerIdentity.portfolios.getPortfolio();
     const balances = await issuerPortfolio.getAssetBalances();
 
     const knownAssetId = tokenInfo.assetId;
@@ -88,8 +87,7 @@ router.post('/buy', protect, async (req, res) => {
     // Create settlement instruction
     const venue = await polymesh.settlements.getVenue({ id: new BigNumber(venueId) });
     const investorIdentity = await polymesh.identities.getIdentity({ did: user.polymesh_did });
-    const investorPortfolios = await investorIdentity.portfolios.getPortfolios();
-    const investorPortfolio = investorPortfolios[0];
+    const investorPortfolio = await investorIdentity.portfolios.getPortfolio();
 
     const tx = await venue.addInstruction({
       legs: [{

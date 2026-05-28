@@ -76,26 +76,24 @@ router.get('/portfolio', async (req, res) => {
   try {
     const polymesh = await connectPolymesh();
     const identity = await polymesh.getSigningIdentity();
-    const portfolios = await identity.portfolios.getPortfolios();
+    const defaultPortfolio = await identity.portfolios.getPortfolio();
 
-    const allBalances = [];
-
-    for (const portfolio of portfolios) {
-      const balances = await portfolio.getAssetBalances();
-      for (const b of balances) {
+    const balances = await defaultPortfolio.getAssetBalances();
+    const portfolio = await Promise.all(
+      balances.map(async (b) => {
         const details = await b.asset.details();
-        allBalances.push({
+        return {
           assetId: b.asset.id,
           name: details.name,
           ticker: details.ticker,
           total: b.total.toString(),
           free: b.free.toString(),
           locked: b.locked.toString(),
-        });
-      }
-    }
+        };
+      })
+    );
 
-    return res.json({ success: true, portfolio: allBalances });
+    return res.json({ success: true, portfolio });
 
   } catch (error) {
     console.error('Portfolio fetch error:', error.message);
@@ -124,9 +122,9 @@ router.post('/identity/create', protect, async (req, res) => {
 
     // Confirm default portfolio exists for the new identity (portfolio "0" is always the default)
     const investorIdentity = await polymesh.identities.getIdentity({ did });
-    const portfolios = await investorIdentity.portfolios.getPortfolios();
-    // DefaultPortfolio has no numeric ID; store '0' to indicate it is initialised
-    const portfolioId = portfolios.length > 0 ? '0' : null;
+    const defaultPortfolio = await investorIdentity.portfolios.getPortfolio();
+    // getPortfolio() with no args returns the DefaultPortfolio; store '0' to indicate it is initialised
+    const portfolioId = defaultPortfolio ? '0' : null;
 
     db.prepare('UPDATE users SET polymesh_did = ?, polymesh_portfolio_id = ? WHERE id = ?')
       .run(did, portfolioId, req.user.id);
@@ -180,12 +178,10 @@ router.post('/settle', protect, async (req, res) => {
     const venue = await polymesh.settlements.getVenue({ id: new BigNumber(venueId) });
 
     const issuerIdentity = await polymesh.getSigningIdentity();
-    const issuerPortfolios = await issuerIdentity.portfolios.getPortfolios();
-    const issuerPortfolio = issuerPortfolios[0];
+    const issuerPortfolio = await issuerIdentity.portfolios.getPortfolio();
 
     const investorIdentity = await polymesh.identities.getIdentity({ did: user_did });
-    const investorPortfolios = await investorIdentity.portfolios.getPortfolios();
-    const investorPortfolio = investorPortfolios[0];
+    const investorPortfolio = await investorIdentity.portfolios.getPortfolio();
 
     const tx = await venue.addInstruction({
       legs: [{
