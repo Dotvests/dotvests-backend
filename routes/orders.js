@@ -17,8 +17,8 @@ router.post('/buy', protect, async (req, res) => {
     }
 
     const upperTicker = ticker.toUpperCase();
-    const tokenPrice = TOKEN_PRICES[upperTicker];
-    if (!tokenPrice) {
+    const tokenInfo = TOKEN_PRICES[upperTicker];
+    if (!tokenInfo) {
       return res.status(400).json({
         success: false,
         message: `Unknown ticker ${ticker}. Supported: ${Object.keys(TOKEN_PRICES).join(', ')}`,
@@ -30,7 +30,7 @@ router.post('/buy', protect, async (req, res) => {
       return res.status(400).json({ success: false, message: 'quantity must be a positive number' });
     }
 
-    const nairaAmount = tokenAmount * tokenPrice;
+    const nairaAmount = tokenAmount * tokenInfo.price;
 
     // Check user has a Polymesh DID
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
@@ -69,18 +69,16 @@ router.post('/buy', protect, async (req, res) => {
     const issuerPortfolio = issuerPortfolios[0];
     const balances = await issuerPortfolio.getAssetBalances();
 
-    let assetId = null;
-    let freeBalance = 0;
+    const knownAssetId = tokenInfo.assetId;
+    let freeBalance = -1;
     for (const b of balances) {
-      const details = await b.asset.details();
-      if (details.ticker === upperTicker) {
-        assetId = b.asset.id;
+      if (b.asset.id === knownAssetId) {
         freeBalance = parseFloat(b.free.toString());
         break;
       }
     }
 
-    if (assetId === null) {
+    if (freeBalance < 0) {
       return res.status(400).json({ success: false, message: `Insufficient token supply. No ${upperTicker} tokens available` });
     }
     if (freeBalance < tokenAmount) {
@@ -116,7 +114,7 @@ router.post('/buy', protect, async (req, res) => {
 
     db.prepare(
       "INSERT INTO settlements (instruction_id, user_id, asset_id, ticker, amount, naira_amount, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')"
-    ).run(instructionId, req.user.id, assetId, upperTicker, tokenAmount, nairaAmount);
+    ).run(instructionId, req.user.id, knownAssetId, upperTicker, tokenAmount, nairaAmount);
 
     db.prepare(
       "INSERT INTO notifications (user_id, title, message) VALUES (?, 'Token Purchase Initiated', ?)"
@@ -147,8 +145,8 @@ router.post('/sell', protect, async (req, res) => {
     }
 
     const upperTicker = ticker.toUpperCase();
-    const tokenPrice = TOKEN_PRICES[upperTicker];
-    if (!tokenPrice) {
+    const tokenInfo = TOKEN_PRICES[upperTicker];
+    if (!tokenInfo) {
       return res.status(400).json({
         success: false,
         message: `Unknown ticker ${ticker}. Supported: ${Object.keys(TOKEN_PRICES).join(', ')}`,
@@ -160,7 +158,7 @@ router.post('/sell', protect, async (req, res) => {
       return res.status(400).json({ success: false, message: 'quantity must be a positive number' });
     }
 
-    const nairaAmount = tokenAmount * tokenPrice;
+    const nairaAmount = tokenAmount * tokenInfo.price;
 
     // Check user has a Polymesh DID
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
@@ -195,15 +193,13 @@ router.post('/sell', protect, async (req, res) => {
     const issuerIdentity = await polymesh.getSigningIdentity();
     const result = await issuerIdentity.assetPermissions.get();
     const assetItems = Object.values(result);
+    const knownAssetId = tokenInfo.assetId;
 
     let assetObj = null;
-    let assetId = null;
     for (const item of assetItems) {
       const a = item.asset || item;
-      const d = await a.details();
-      if (d.ticker === upperTicker) {
+      if (a.id === knownAssetId) {
         assetObj = a;
-        assetId = a.id;
         break;
       }
     }
@@ -233,7 +229,7 @@ router.post('/sell', protect, async (req, res) => {
 
     db.prepare(
       "INSERT INTO settlements (instruction_id, user_id, asset_id, ticker, amount, naira_amount, status) VALUES (?, ?, ?, ?, ?, ?, 'burned')"
-    ).run('REDEEM-' + Date.now(), req.user.id, assetId, upperTicker, tokenAmount, nairaAmount);
+    ).run('REDEEM-' + Date.now(), req.user.id, knownAssetId, upperTicker, tokenAmount, nairaAmount);
 
     db.prepare(
       "INSERT INTO notifications (user_id, title, message) VALUES (?, 'Token Sale Completed', ?)"
