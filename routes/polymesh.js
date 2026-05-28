@@ -76,6 +76,7 @@ router.get('/portfolio', async (req, res) => {
   try {
     const polymesh = await connectPolymesh();
     const identity = await polymesh.getSigningIdentity();
+    console.log('[portfolio] signing DID:', identity.did);
     const defaultPortfolio = await identity.portfolios.getPortfolio();
 
     const balances = await defaultPortfolio.getAssetBalances();
